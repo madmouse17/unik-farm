@@ -38,19 +38,19 @@ def load_wallet():
 # ---------------------------------------------------------------------------
 def solve_turnstile():
     from camoufox.sync_api import Camoufox
-    
+
     print("[1/5] Solving Turnstile via Camoufox...", flush=True)
-    
+
     with Camoufox(headless=False) as browser:
         ctx = browser.new_context()
         page = ctx.new_page()
         page.goto(SIGN_IN_URL, wait_until="domcontentloaded", timeout=60000)
-        
+
         JS_LEN = (
             '(function(){ var el = document.querySelector("input[name=\\"cf-turnstile-response\\"]");'
             ' return el ? (el.value || "").length : 0; })()'
         )
-        
+
         turnstile_token = None
         for i in range(60):
             time.sleep(1)
@@ -65,7 +65,7 @@ def solve_turnstile():
                     break
             except:
                 pass
-        
+
         if not turnstile_token:
             print("  [!] Turnstile not solved, trying reload...", flush=True)
             page.reload(wait_until="domcontentloaded", timeout=30000)
@@ -82,17 +82,17 @@ def solve_turnstile():
                         break
                 except:
                     pass
-        
+
         # Also grab cookies
         cookies = ctx.cookies()
         cookie_dict = {c["name"]: c["value"] for c in cookies}
-        
+
         ctx.close()
-    
+
     if not turnstile_token:
         print("  [!] FAILED to solve Turnstile", flush=True)
         return None, {}
-    
+
     return turnstile_token, cookie_dict
 
 
@@ -111,10 +111,10 @@ def wallet_login(account, turnstile_token, cookies):
     # Set cookies
     for name, value in cookies.items():
         session.cookies.set(name, value)
-    
+
     wallet_address = account.address
     print("\n[2/5] Requesting wallet challenge for %s..." % wallet_address, flush=True)
-    
+
     # POST /api/oauth/web3/challenge
     resp = session.post(
         "%s/api/oauth/web3/challenge" % API_BASE,
@@ -122,27 +122,27 @@ def wallet_login(account, turnstile_token, cookies):
         timeout=30,
     )
     print("  Status: %d" % resp.status_code, flush=True)
-    
+
     try:
         challenge_data = resp.json()
         print("  Response: %s" % json.dumps(challenge_data, indent=2)[:500], flush=True)
     except:
         print("  Response text: %s" % resp.text[:500], flush=True)
         return None
-    
+
     if not challenge_data.get("success"):
         print("  [!] Challenge failed: %s" % challenge_data.get("message", "unknown"), flush=True)
         return None
-    
+
     # Extract message + nonce from challenge
     data = challenge_data.get("data", {})
     sign_message = data.get("message", "")
     nonce = data.get("nonce", "")
-    
+
     print("\n[3/5] Signing challenge message...", flush=True)
     print("  Message: %s" % sign_message[:200], flush=True)
     print("  Nonce: %s" % nonce, flush=True)
-    
+
     # Sign with personal_sign (eth_sign if hex, personal_sign if text)
     try:
         if sign_message.startswith("0x"):
@@ -154,9 +154,9 @@ def wallet_login(account, turnstile_token, cookies):
     except Exception as e:
         print("  [!] Signing failed: %s" % e, flush=True)
         return None
-    
+
     print("\n[4/5] Verifying signature...", flush=True)
-    
+
     # POST /api/oauth/web3/verify
     # Exact payload from JS source:
     #   action: "login", wallet_address, nonce, signature, chain_id: 56, turnstile, hcaptcha
@@ -169,7 +169,7 @@ def wallet_login(account, turnstile_token, cookies):
         "turnstile": turnstile_token,
         "hcaptcha": "",
     }
-    
+
     resp = session.post(
         "%s/api/oauth/web3/verify" % API_BASE,
         json=verify_payload,
@@ -177,7 +177,7 @@ def wallet_login(account, turnstile_token, cookies):
         timeout=30,
     )
     print("  Status: %d" % resp.status_code, flush=True)
-    
+
     print("  Headers:", dict(resp.headers), flush=True)
     try:
         verify_data = resp.json()
@@ -185,17 +185,17 @@ def wallet_login(account, turnstile_token, cookies):
     except:
         print("  Response text: %s" % resp.text[:500], flush=True)
         return None
-    
+
     if not verify_data.get("success"):
         print("  [!] Verify failed: %s" % verify_data.get("message", "unknown"), flush=True)
         return None
-    
+
     # Extract JWT from response - the response sets session cookies (session=...)
     # Token is typically in Set-Cookie header or response body
     token = verify_data.get("data", {}).get("token") or verify_data.get("token")
     if isinstance(token, dict):
         token = token.get("session", "") or json.dumps(token)
-    
+
     # Check all Set-Cookie headers
     session_cookies = session.cookies.get_dict()
     all_cookies = {}
@@ -208,9 +208,9 @@ def wallet_login(account, turnstile_token, cookies):
     elif "session" in session_cookies:
         token = session_cookies["session"]
         print("  Session token: %s..." % token[:60], flush=True)
-    
+
     print("\n  Final token: %s" % (str(token)[:60] if token else "None"), flush=True)
-    
+
     return {"session": session, "token": token, "verify_data": verify_data, "cookies": session_cookies}
 
 
@@ -220,31 +220,31 @@ def wallet_login(account, turnstile_token, cookies):
 def collect_api(result):
     if not result:
         return {}
-    
+
     session = result["session"]
     token = result.get("token")
     cookies = result.get("cookies", {})
-    
+
     print("\n[5/5] Collecting API credentials...", flush=True)
-    
+
     results = {"wallet": None, "username": None, "api_key": None, "token": token}
-    
+
     # Build auth headers - New-Api-User header is required
     user_id = result["verify_data"]["data"]["id"]
     auth_headers = {"New-Api-User": str(user_id)}
-    
+
     # Ensure session cookie is set
     if "session" in cookies:
         session.cookies.set("session", cookies["session"], domain=".getunikey.ai")
         session.cookies.set("session", cookies["session"], domain="getunikey.ai")
-    
+
     print("  User ID: %d" % user_id, flush=True)
     print("  All cookies: %s" % list(session.cookies.get_dict().keys()), flush=True)
-    
+
     # Get user info - try /api/user/self with cookie auth
     try:
         resp = session.get(
-            "%s/api/user/self" % API_BASE, 
+            "%s/api/user/self" % API_BASE,
             headers=auth_headers,
             timeout=30,
         )
@@ -270,7 +270,7 @@ def collect_api(result):
                     print("  User: %s (cookie auth works)" % results["username"], flush=True)
     except Exception as e:
         print("  /api/user/self error: %s" % e, flush=True)
-    
+
     # Get API keys
     try:
         resp = session.get(
@@ -310,7 +310,7 @@ def collect_api(result):
             print("  /api/token/ also 401 - auth not working", flush=True)
     except Exception as e:
         print("  /api/token/ error: %s" % e, flush=True)
-    
+
     return results
 
 
@@ -320,25 +320,31 @@ def collect_api(result):
 def main():
     account = load_wallet()
     print("[*] Wallet: %s" % account.address, flush=True)
-    
+
     # Step 1: Solve Turnstile
     turnstile_token, cookies = solve_turnstile()
     if not turnstile_token:
         print("\n[!] Cannot proceed without Turnstile token", flush=True)
         sys.exit(1)
-    
+
     # Steps 2-4: API flow
     result = wallet_login(account, turnstile_token, cookies)
-    
+
     # Step 5: Collect API credentials
     results = collect_api(result)
     results["wallet"] = account.address
-    
-    # Save results
+
+    # Save results (APPEND — never wipe history, one JSON line per run)
     results_file = Path(__file__).parent / "results.json"
-    with open(results_file, "w") as f:
-        json.dump(results, f, indent=2)
-    
+    results["timestamp"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        with open(results_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps(results) + "\n")
+            f.flush()
+    except OSError as e:
+        print("[!] cannot append results: %s" % e, flush=True)
+        results_file = None
+
     print("\n" + "="*60, flush=True)
     print("RESULTS:", flush=True)
     print("  wallet:    %s" % results.get("wallet"), flush=True)
@@ -347,7 +353,7 @@ def main():
     print("  token:     %s" % (str(results.get("token"))[:50] if results.get("token") else "not found"), flush=True)
     print("  saved to:  %s" % results_file, flush=True)
     print("="*60, flush=True)
-    
+
     print("\n[PRIVATE KEY]: %s" % account.key.hex(), flush=True)
 
 

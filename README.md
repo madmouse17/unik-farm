@@ -9,16 +9,24 @@ Bulk create getunikey.ai accounts + extract FULL unmasked API keys via pure API.
 2. API login: POST challenge -> sign with wallet -> POST verify -> session cookie
 3. POST /api/token/       -> create new API key (returns token ID)
 4. POST /api/token/{id}/key -> fetch FULL unmasked key (sk-xxxx)
-5. Save to wallet_apikey.txt
+5. Append to wallet_apikey.txt immediately, one line per success
 ```
 
 No web UI navigation. No clipboard tricks. Pure REST API.
+
+Key extraction is rate-limited per IP: after ~10-15 challenges getunikey.ai returns HTTP 429.
+The script handles that automatically:
+
+- On failure it rotates to the next proxy (proxies.txt), then retries
+- Rate-limit cooldowns ramp up (45s x attempt, plus extra pauses)
+- Detected via status code + Chinese/English error keywords
 
 ## Prerequisites
 
 - Python 3.10+ (tested on 3.11, 3.12)
 - Camoufox (anti-detect Firefox)
 - eth_account (Ethereum signing)
+- PySocks (only needed for `socks5://` proxies)
 
 ## Setup
 
@@ -29,10 +37,12 @@ venv\Scripts\activate        # Windows
 # source venv/bin/activate   # Linux/Mac
 
 # 2. Install dependencies
-pip install camoufox eth-account requests
+pip install -r requirements.txt
 
-# 3. Prepare wallet_info.json
-# (must contain HD wallet mnemonic for deriving accounts)
+# 3. Download the camoufox browser binary (one time, ~493 MB)
+camoufox fetch
+
+# 4. Prepare wallet_info.json (see below)
 ```
 
 ### wallet_info.json format
@@ -46,57 +56,107 @@ pip install camoufox eth-account requests
 This mnemonic is used to derive child wallets (m/44'/60'/0'/0/0, /1, /2, ...).
 Each child wallet becomes a separate getunikey.ai account.
 
+If `wallet_info.json` is missing or corrupt the script generates a brand new
+master wallet automatically (old file is backed up as `.json.bak`).
+
 ## Usage
 
-```bash
-# Create 1 account (browser window visible, tanya clean)
-python multi_apikey.py 1
+Run without arguments for an interactive wizard:
 
-# Create 5 accounts
+```bash
+python multi_apikey.py
+```
+
+```
+==================================================
+ GETUNIKEY BOT — Account Creator
+==================================================
+Berapa akun mau dibuat? [1-100] > 5
+Headless mode (no browser window)? [y/N] > n
+```
+
+You can also pass everything as arguments:
+
+```bash
+# Create 5 accounts, browser window visible
 python multi_apikey.py 5
 
-# Headless mode (no browser window)
-python multi_apikey.py 5 --headless
-
-# Force clean old keys (skip prompt)
-python multi_apikey.py 3 --clean
-
-# Combine flags
-python multi_apikey.py 10 --headless --clean
+# Headless, no prompts (count given => only "delete keys" style Qs are auto)
+python multi_apikey.py 10 --headless
 ```
 
 ### Options
 
 | Flag | Description |
 |------|-------------|
-| `<count>` | **(required)** Number of accounts to create |
+| `<count>`  | Number of accounts to create (optional; askes interactively if missing) |
 | `--headless` | Run Camoufox in headless mode (no GUI) |
-| `--clean` | Delete existing API keys before creating new ones |
 
-Without `--clean`, the script will ask `Delete existing keys? [y/N]` (default: N = keep old keys).
+## Proxy rotation
+
+The script starts on your **local IP**. Every time an account fails and the
+retry loop is exhausted, the proxy router advances to the next entry in
+`proxies.txt`:
+
+```
+local -> proxy1 -> proxy2 -> ... -> proxyN -> local -> ...
+```
+
+- **Success** on the current hop: it stays there for the next account.
+- **Failure** after retries: it rotates to the next route in the file.
+- Wraps back to local after the last proxy.
+
+Because each rotation attempt uses a **fresh browser context**, cookies and
+fingerprints are not reused across proxies.
+
+### proxies.txt format
+
+Start from the template `proxies.example` (copy to `proxies.txt`):
+
+```
+# host:port
+123.45.67.89:8080
+
+# host:port:user:pass
+123.45.67.89:8080:username:password
+
+# full URL
+http://user:pass@123.45.67.89:8080
+socks5://123.45.67.89:1080
+```
+
+`socks5://` proxies require PySocks (`pip install PySocks`, included in requirements.txt).
+
+> `proxies.txt` is gitignored (real pool contains credentials). Only the
+> credential-free `proxies.example` template is tracked.
 
 ## Output Files
 
-### wallet_apikey.txt (main output)
+### wallet_apikey.txt (main output, append-only)
 
-Format: `wallet_address|sk-full-unmasked-key`
+Every successful account appends one line **immediately** (crash-safe, flushed):
 
 ```
-0xe6dE38E6bB8de3CC96f342c12707F0c8AC8973a8|sk-dlkb1BxTxFbL51csrZcee0KGMGBULoXymZ45VOp4oaqz0Sqd
-0x6dE90e1aA70Cce61C9660152cbe5759722Ee1eBC|sk-aB3x...full...key...here
+wallet_address|sk-full-key
 ```
 
-### multi_accounts.json (detailed results)
+### multi_failed.txt (failures, append-only)
+
+Failed accounts append one line each with the error, so nothing is lost:
+
+```
+wallet_address|error description
+```
+
+### multi_accounts.json (snapshot)
+
+Full session summary written at the end of the run:
 
 ```json
 [
   {
-    "wallet": "0xe6dE...",
-    "username": "wallet_0xe6dE38",
-    "user_id": 157604,
-    "session": "...",
-    "api_key": "sk-dlkb1Bx...0Sqd",
-    "token_id": 156906,
+    "wallet": "0xe6dE38...",
+    "key": "sk-dlkb1Bx...0Sqd",
     "status": "OK"
   }
 ]
@@ -148,18 +208,20 @@ Full list: `GET /v1/models` with Bearer auth.
 - Check internet connection
 - Turnstile sometimes needs a reload — the script auto-retries once
 
-### 401 Unauthorized on API calls
-- Session cookie expired
-- Run the script again (fresh login each time)
+### 429 rate-limited
+- Normal for getunikey.ai after many rapid logins
+- The script back-offs automatically (45s x attempt) and rotates proxies
+- Add more proxies to `proxies.txt` to spread requests across IPs
 
 ### Key extraction returns empty
 - Check if `/api/token/{id}/key` endpoint is still available
-- The API may have changed — the script logs full responses for debugging
+- The API may have changed — check `multi_failed.txt` / run non-headless to see live errors
 
 ## Security Notes
 
 - `wallet_info.json` contains your HD mnemonic — NEVER commit it
 - `wallet_apikey.txt` contains full API keys — NEVER commit it
+- `proxies.txt` may contain proxy credentials — NEVER commit it
 - `.gitignore` is configured to exclude all credential files
 - All API keys are per-account, revocable from the getunikey.ai dashboard
 
@@ -168,10 +230,15 @@ Full list: `GET /v1/models` with Bearer auth.
 ```
 getunikey-bot/
   multi_apikey.py      # Main script (create accounts + extract keys)
+  captcha_solvers.py   # Turnstile fallback solvers (CapSolver -> 2Captcha)
+  proxy_manager.py     # Proxy router (local -> proxies.txt rotation)
   wallet_login.py      # Single account login utility
   wallet_info.json     # HD wallet mnemonic (DO NOT COMMIT)
-  wallet_apikey.txt    # Output: wallet|sk-full-key (DO NOT COMMIT)
-  multi_accounts.json  # Detailed results (DO NOT COMMIT)
+  wallet_apikey.txt    # Output: wallet|sk-full-key (append-only, DO NOT COMMIT)
+  multi_failed.txt     # Output: failed accounts (append-only, DO NOT COMMIT)
+  multi_accounts.json  # End-of-run snapshot (DO NOT COMMIT)
+  proxies.txt          # Proxy pool (DO NOT COMMIT)
+  .env                 # API keys for captcha solvers (DO NOT COMMIT)
   .gitignore           # Protects credential files
   README.md            # This file
 ```
