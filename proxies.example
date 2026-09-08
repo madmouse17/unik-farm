@@ -1,0 +1,14 @@
+# Daftar proxy, satu per baris. Baris diawali # diabaikan.
+# Format yang didukung:
+#   host:port
+#   host:port:user:pass
+#   http://user:pass@host:port
+#   socks5://host:port
+#
+# Contoh:
+# 123.45.67.89:8080
+# 123.45.67.89:8080:username:password
+# http://user:pass@123.45.67.89:8080
+# socks5://123.45.67.89:1080
+#
+# Copy this file to proxies.txt (real proxy pool, gitignored)
