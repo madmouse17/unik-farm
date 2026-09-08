@@ -2,6 +2,16 @@
 
 Bulk create getunikey.ai accounts + extract FULL unmasked API keys via pure API.
 
+## ☕ Buy Me a Coffee
+
+Kalau project ini bermanfaat dan kamu mau support, bisa traktir kopi ☕
+
+<p align="center">
+  <img src="qris.jpeg" alt="QRIS — Buy Me a Coffee" width="280">
+</p>
+
+Scan QRIS di atas via e-wallet apa saja (GoPay, OVO, DANA, ShopeePay, m-banking). Setiap kopi sangat berarti untuk terus develop tool gratis seperti ini 🙏
+
 ## How It Works
 
 ```
@@ -175,3 +185,14 @@ getunikey-bot/
   .gitignore           # Protects credential files
   README.md            # This file
 ```
+
+## ⚠️ Disclaimer
+
+> **Project ini dibuat 100% untuk tujuan pembelajaran (educational purpose only).**
+> Belajar browser automation, anti-detect fingerprinting, dan API integration itu legal —
+> menyalahgunakan tools untuk aktivitas ilegal (fraud, spam, abuse layanan, atau apapun
+> yang melanggar hukum & ToS) **BUKAN tanggung jawab author**.
+>
+> Kamu memakai script ini dengan risiko sendiri. Segala konsekuensi, sanksi, atau
+> masalah hukum yang muncul dari penyalahgunaan sepenuhnya menjadi tanggung jawab
+> pengguna. Gunakan dengan bijak, dan hormati sistem lain.
