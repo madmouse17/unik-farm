@@ -67,11 +67,11 @@ python multi_apikey.py 10 --headless --clean
 
 ### Options
 
-| Flag | Description |
-|------|-------------|
-| `<count>` | **(required)** Number of accounts to create |
-| `--headless` | Run Camoufox in headless mode (no GUI) |
-| `--clean` | Delete existing API keys before creating new ones |
+| Flag         | Description                                       |
+| ------------ | ------------------------------------------------- |
+| `<count>`    | **(required)** Number of accounts to create       |
+| `--headless` | Run Camoufox in headless mode (no GUI)            |
+| `--clean`    | Delete existing API keys before creating new ones |
 
 Without `--clean`, the script will ask `Delete existing keys? [y/N]` (default: N = keep old keys).
 
@@ -144,15 +144,18 @@ Full list: `GET /v1/models` with Bearer auth.
 ## Troubleshooting
 
 ### Turnstile not solving
+
 - Make sure `--headless` is OFF (visible browser helps)
 - Check internet connection
 - Turnstile sometimes needs a reload — the script auto-retries once
 
 ### 401 Unauthorized on API calls
+
 - Session cookie expired
 - Run the script again (fresh login each time)
 
 ### Key extraction returns empty
+
 - Check if `/api/token/{id}/key` endpoint is still available
 - The API may have changed — the script logs full responses for debugging
 
@@ -163,12 +166,54 @@ Full list: `GET /v1/models` with Bearer auth.
 - `.gitignore` is configured to exclude all credential files
 - All API keys are per-account, revocable from the getunikey.ai dashboard
 
+## Auto-push to 9router
+
+Every successful `sk-xxxx` key is immediately pushed as one entry
+(`9router-<addr8>`) to the OpenAI-compatible provider node via `POST /api/providers`.
+
+### Setup (follow in order)
+
+```bash
+# 1. Copy the example config first (DO NOT edit nine_router.example.json — the script never reads it)
+cp nine_router.example.json nine_router.json
+
+# 2. Fill in the DASHBOARD LOGIN password in nine_router.json
+nano nine_router.json
+```
+
+> NOT the inference API key (`sk_9...` from Settings) — it only works for
+> model usage (`/v1/*`) and is REJECTED by the add-key endpoint.
+> File-less alternative: `export NINE_ROUTER_PASSWORD="your-password"`.
+
+```bash
+# 3. Check the connection with no side effects (must pass before bulk runs)
+python nine_router.py --check
+
+# 4. Run as usual (automatic push per successful account)
+python multi_apikey.py 5
+
+# Without push:
+python multi_apikey.py 5 --no-push
+```
+
+Push status is recorded in `multi_accounts.json` under the `nine_router` field
+(`PUSHED:<id>` / `PUSH-FAIL:<reason>` / `NOPUSH-NOCONFIG`).
+
+### Troubleshooting `--check` unauthorized
+
+1. `nine_router.json` doesn't exist yet (only the example) → repeat steps 1–2.
+2. Wrong password / different from the one used to open the dashboard in the browser.
+3. Filled in the inference API key instead → replace it with the dashboard password.
+4. Dashboard uses SSO login → password doesn't apply, contact the server admin.
+
 ## File Structure
 
 ```
 getunikey-bot/
   multi_apikey.py      # Main script (create accounts + extract keys)
   wallet_login.py      # Single account login utility
+  nine_router.py       # Push key ke 9router provider node
+  nine_router.json     # Password dashboard 9router (DO NOT COMMIT)
   wallet_info.json     # HD wallet mnemonic (DO NOT COMMIT)
   wallet_apikey.txt    # Output: wallet|sk-full-key (DO NOT COMMIT)
   multi_accounts.json  # Detailed results (DO NOT COMMIT)

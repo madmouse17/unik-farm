@@ -10,7 +10,7 @@ Flow per account:
 4. Get FULL unmasked key via POST /api/token/{id}/key
 5. Save: wallet|sk-xxxxx
 """
-import time, json, sys, threading
+import time, json, sys, os, threading
 from pathlib import Path
 from camoufox.sync_api import Camoufox
 from eth_account import Account, messages
@@ -42,16 +42,18 @@ TURNSTILE_JS = """(function(){
 
 # ===================== STATE =====================
 class State:
-    def __init__(self, total, headless, clean):
+    def __init__(self, total, headless, clean, no_push=False):
         self.total = total
         self.headless = headless
         self.clean = clean
+        self.no_push = no_push
+        self.nr = None  # NineRouter client (dibuat sekali di main)
         self.success = 0
         self.failed = 0
         self.current = 0
         self.status = "Initializing..."
         self.current_wallet = ""
-        self.results = []  # (short_addr, full_key_or_err, status)
+        self.results = []  # (full_addr, short_addr, full_key_or_err, status, push)
         self.lock = threading.RLock()
         self.start_time = time.time()
         self.avg_time = 0
@@ -64,10 +66,22 @@ def update_status(msg):
 
 # ===================== HELPERS =====================
 def load_wallet_info():
-    with open(Path(__file__).parent / "wallet_info.json") as f:
+    info_path = Path(__file__).parent / "wallet_info.json"
+    if not info_path.exists():
+        print(f"[!] wallet_info.json tidak ditemukan: {info_path}")
+        print('    Buat file berisi: {"mnemonic": "dua belas kata mnemonic ..."}')
+        sys.exit(1)
+    with open(info_path) as f:
         wallet = json.load(f)
-    mnemonic = wallet["mnemonic"]
-    master_acct = Account.from_mnemonic(mnemonic)
+    mnemonic = wallet.get("mnemonic", "").strip() if isinstance(wallet, dict) else ""
+    if not mnemonic:
+        print('[!] wallet_info.json ada tapi field "mnemonic" kosong.')
+        sys.exit(1)
+    try:
+        master_acct = Account.from_mnemonic(mnemonic)
+    except Exception as e:
+        print(f"[!] mnemonic tidak valid: {e}")
+        sys.exit(1)
     return mnemonic, master_acct
 
 def derive_wallets(mnemonic, count):
@@ -154,13 +168,26 @@ def api_login(page, addr, privkey, turnstile):
                 hcaptcha:''
             })
         });
-        return await r.json();
+        var text = await r.text();
+        var data = null;
+        try { data = JSON.parse(text); } catch(e) {}
+        return {status: r.status, data: data, raw: text.substring(0,200)};
     })()""")
 
-    if not verify.get("success"):
-        return None, "verify failed: %s" % verify.get("message", "unknown")
+    if not isinstance(verify, dict):
+        return None, "verify bad response"
 
-    return verify["data"], None
+    if verify.get("status") != 200:
+        return None, "verify http-%s: %s" % (verify.get("status"), (verify.get("raw") or "")[:40])
+
+    data = verify.get("data")
+    if not isinstance(data, dict):
+        return None, "verify non-JSON: %s" % (verify.get("raw") or "")[:40]
+
+    if not data.get("success"):
+        return None, "verify failed: %s" % data.get("message", "unknown")
+
+    return data["data"], None
 
 def get_session_cookie(ctx):
     for c in ctx.cookies():
@@ -325,10 +352,12 @@ def make_results_box():
     table.add_column("Wallet", style="green")
     table.add_column("Key", style="yellow")
     table.add_column("Status", justify="center")
-    for i, (w, k, s) in enumerate(results[-12:], 1):
+    table.add_column("9R", justify="center")
+    for i, (full, w, k, s, p) in enumerate(results[-12:], 1):
         style = "bold green" if s == "OK" else "bold red"
         preview = k[:12] + "..." + k[-6:] if s == "OK" and len(k) > 20 else k
-        table.add_row(str(i), w, preview, Text(s, style=style))
+        mark = "✓" if p.startswith("PUSHED") else ("✗" if p.startswith("PUSH-FAIL") else "-")
+        table.add_row(str(i), w, preview, Text(s, style=style), mark)
     return Panel(table, title="[bold cyan]Results[/]", border_style="cyan", box=box.ROUNDED)
 
 
@@ -440,10 +469,21 @@ def run_account(ctx, w, idx, total, clean):
             update_status("Fetching full key...")
             full_key, err = get_full_key(session, uid, token_id)
             if full_key and full_key.startswith("sk-") and len(full_key) > 20:
+                # Step 5: Push ke 9router (diskip bila tanpa kredensial)
+                push = "-"
+                if state.nr is not None:
+                    update_status("Pushing to 9router...")
+                    ok, info = state.nr.push_key("9router-%s" % addr[2:10], full_key)
+                    if not ok and info == "skip-tanpa-kredensial":
+                        push = "NOPUSH-NOCONFIG"
+                    else:
+                        push = ("PUSHED:%s" % info) if ok else ("PUSH-FAIL:%s" % info)
+                elif not state.no_push:
+                    push = "NOPUSH-NOCONFIG"
                 elapsed = time.time() - state.start_time
                 with state.lock:
                     state.success += 1
-                    state.results.append((short, full_key, "OK"))
+                    state.results.append((addr, short, full_key, "OK", push))
                     if state.avg_time == 0:
                         state.avg_time = elapsed
                     else:
@@ -477,7 +517,7 @@ def run_account(ctx, w, idx, total, clean):
     # All retries exhausted
     with state.lock:
         state.failed += 1
-        state.results.append((short, last_err[:50], "FAIL"))
+        state.results.append((addr, short, last_err[:50], "FAIL", "-"))
     return False
 
 
@@ -493,6 +533,10 @@ def main():
         print("Options:")
         print("  --headless  Run browser in headless mode (no GUI)")
         print("  --clean     Delete existing keys before creating new ones")
+        print("  --no-push   Jangan push key ke 9router (default: push bila config ada)")
+        print("")
+        print("9router push: set NINE_ROUTER_PASSWORD (wajib, password dashboard)")
+        print("  atau buat nine_router.json. Cek koneksi: python nine_router.py --check")
         print("")
         print("Examples:")
         print("  python multi_apikey.py 5              # 5 accounts, tanya clean")
@@ -507,6 +551,7 @@ def main():
     count = int(sys.argv[1])
     headless = "--headless" in sys.argv
     clean = "--clean" in sys.argv
+    no_push = "--no-push" in sys.argv
 
     # Interactive prompt if --clean not specified
     if not clean:
@@ -519,7 +564,20 @@ def main():
     mnemonic, master_acct = load_wallet_info()
     wallets = derive_wallets(mnemonic, count)
 
-    state = State(count, headless, clean)
+    state = State(count, headless, clean, no_push)
+
+    # 9router client (skip bila tanpa kredensial / --no-push; import malas agar
+    # script tetap jalan walau nine_router.py belum ada)
+    if not no_push:
+        try:
+            from nine_router import NineRouter as _NR, load_config as _nr_config, has_credentials as _nr_has
+            _cfg = _nr_config()
+            if _nr_has(_cfg):
+                state.nr = _NR(_cfg)
+            else:
+                print("[9router] kredensial tidak ada — skip push.")
+        except Exception as e:
+            print("[9router] init gagal (%s) — lanjut tanpa push." % str(e)[:60])
 
     is_tty = sys.stdout.isatty()
     if is_tty:
@@ -571,13 +629,11 @@ def main():
         elapsed = time.time() - state.start_time
         avg = state.avg_time
 
-    # Save wallet_apikey.txt (full keys from multi_accounts.json)
-    # We need to re-read from the detailed results
+    # Save wallet_apikey.txt (alamat PENUH + full key)
     lines = []
-    for r in results:
-        addr, key_or_err, status = r
+    for full, short, key_or_err, status, push in results:
         if status == "OK":
-            lines.append("%s|%s" % (addr, key_or_err))
+            lines.append("%s|%s" % (full, key_or_err))
 
     # Save wallet_apikey.txt
     with open(OUTPUT_FILE, "w") as f:
@@ -586,7 +642,17 @@ def main():
 
     # Save detailed results
     with open(DETAILS_FILE, "w") as f:
-        json.dump([{"wallet": r[0], "key": r[1], "status": r[2]} for r in results], f, indent=2)
+        json.dump([{"wallet": full, "key": k, "status": s, "nine_router": p}
+                   for full, short, k, s, p in results], f, indent=2)
+
+    for _f in (OUTPUT_FILE, DETAILS_FILE):
+        try:
+            os.chmod(_f, 0o600)
+        except OSError:
+            pass
+
+    pushed = sum(1 for r in results if r[4].startswith("PUSHED"))
+    push_failed = sum(1 for r in results if r[4].startswith("PUSH-FAIL"))
 
     # Summary
     if is_tty:
@@ -595,10 +661,15 @@ def main():
         print("SUMMARY: %d success, %d failed, %.0fs total" % (success, failed, elapsed))
         if avg:
             print("Avg time/account: %.1fs" % avg)
+        if state.nr is not None:
+            print("9router: %d pushed, %d push-failed" % (pushed, push_failed))
         print("Results saved to: %s" % DETAILS_FILE)
         print("=" * 60)
     else:
-        print("%d/%d OK, %d FAIL" % (success, count, failed))
+        if state.nr is not None:
+            print("%d/%d OK, %d FAIL, 9router %d pushed/%d failed" % (success, count, failed, pushed, push_failed))
+        else:
+            print("%d/%d OK, %d FAIL" % (success, count, failed))
 
 
 if __name__ == "__main__":

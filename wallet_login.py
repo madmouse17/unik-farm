@@ -24,6 +24,10 @@ INFO = Path(__file__).parent / "wallet_info.json"
 # Load wallet
 # ---------------------------------------------------------------------------
 def load_wallet():
+    if not INFO.exists():
+        print(f"[!] wallet_info.json tidak ditemukan: {INFO}")
+        print('    Buat file berisi: {"mnemonic": "dua belas kata mnemonic ..."}')
+        sys.exit(1)
     with open(INFO) as f:
         data = json.load(f)
     mn = data.get("mnemonic", "")
