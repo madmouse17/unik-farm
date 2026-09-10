@@ -27,3 +27,8 @@ venv/
 
 # === EXTENSIONS (large binary) ===
 extensions/
+
+# === SECRETS ===
+.env
+multi_failed.txt
+proxies.txt

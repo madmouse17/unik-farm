@@ -1,0 +1,11 @@
+camoufox>=0.4
+eth-account==0.13.7
+rich==13.9.4
+requests==2.32.5
+python-dotenv==1.0.1
+playwright==1.59.0
+PySocks==1.7.1
+
+# Setelah pip install, wajib jalankan sekali:
+#   camoufox fetch
+# (download browser ~493MB; tanpa ini muncul error "CamoufoxNotInstalled")

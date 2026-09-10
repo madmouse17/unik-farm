@@ -27,7 +27,7 @@ from rich import box
 
 # ===================== CONFIG =====================
 MAX_RETRIES = 3
-RETRY_DELAY = 5
+RETRY_DELAY = 3
 
 CHAIN_ID = 56
 KEY_NAME_PREFIX = "9router"
@@ -102,19 +102,38 @@ def wait_turnstile(page, timeout=60):
             val = page.evaluate(TURNSTILE_JS)
             if val and len(val) > 10:
                 return val
-        except:
+        except Exception:
             pass
     return None
 
-def solve_turnstile(page, timeout=60):
-    update_status("Loading sign-in page...")
-    page.goto(SIGN_IN_URL, wait_until="domcontentloaded", timeout=60000)
-    time.sleep(3)
+def safe_evaluate(page, js, retries=3, delay=2):
+    """Evaluate JS with retry on Playwright serialize errors."""
+    for attempt in range(retries):
+        try:
+            return page.evaluate(js)
+        except Exception as e:
+            err = str(e)
+            if "JSON.parse" in err or "unexpected end" in err or "Target closed" in err:
+                if attempt < retries - 1:
+                    time.sleep(delay)
+                    continue
+            raise
+    return None
 
-    if not page.evaluate('document.querySelector(\'input[name="cf-turnstile-response"]\')'):
+def solve_turnstile(page, timeout=90):
+    update_status("Loading sign-in page...")
+    page.goto(SIGN_IN_URL, wait_until="load", timeout=60000)
+    time.sleep(5)
+
+    try:
+        has_turnstile = safe_evaluate(page, 'document.querySelector(\'input[name="cf-turnstile-response"]\')')
+    except:
+        has_turnstile = None
+
+    if not has_turnstile:
         update_status("Reloading page...")
         page.reload(wait_until="domcontentloaded", timeout=30000)
-        time.sleep(5)
+        time.sleep(8)
 
     update_status("Solving Turnstile...")
     turnstile = wait_turnstile(page, timeout)
@@ -125,18 +144,26 @@ def solve_turnstile(page, timeout=60):
     return turnstile
 
 def api_login(page, addr, privkey, turnstile):
+    # Wait for page to be fully ready
+    time.sleep(2)
+
+    js_challenge = """(async function(){
+        var r = await fetch('/api/oauth/web3/challenge',{
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({wallet_address:'""" + addr + """'})
+        });
+        var text = await r.text();
+        try { return JSON.parse(text); } catch(e) { return {_raw: text.substring(0,200), _err: e.message}; }
+    })()"""
+
     try:
-        challenge = page.evaluate("""(async function(){
-            var r = await fetch('/api/oauth/web3/challenge',{
-                method:'POST',
-                headers:{'Content-Type':'application/json'},
-                body:JSON.stringify({wallet_address:'""" + addr + """'})
-            });
-            var text = await r.text();
-            try { return JSON.parse(text); } catch(e) { return {_raw: text.substring(0,200), _err: e.message}; }
-        })()""")
+        challenge = safe_evaluate(page, js_challenge, retries=3, delay=3)
     except Exception as e:
-        return None, "page.evaluate error: %s" % str(e)[:30]
+        return None, "evaluate error: %s" % str(e)[:30]
+
+    if not challenge:
+        return None, "evaluate returned None"
 
     if "_err" in challenge:
         return None, "JSON parse err: %s" % challenge.get("_raw", "")[:20]
@@ -406,9 +433,10 @@ def run_account(ctx, w, idx, total, clean):
             if idx > 0 or attempt > 0:
                 update_status("Fresh session (attempt %d)..." % (attempt + 1))
                 ctx.clear_cookies()
-                time.sleep(1)
+                time.sleep(2)
 
             page = ctx.new_page()
+            time.sleep(2)  # Let page stabilize before any evaluate
 
             # Step 1: Turnstile
             turnstile = solve_turnstile(page)
@@ -597,9 +625,9 @@ def main():
 
                         # Delay between accounts
                         if idx < count - 1:
-                            update_status("Cooldown 4s...")
+                            update_status("Cooldown 3s...")
                             live.update(update_layout())
-                            time.sleep(4)
+                            time.sleep(3)
 
                     update_status("Done!")
                     live.update(update_layout())
